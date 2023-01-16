@@ -14,8 +14,8 @@ import (
 )
 
 type envConfig struct {
-	Port          string        `envconfig:"PORT" default:"8080"`
-	RootPath      string        `envconfig:"ROOT_PATH" default:"/static"`
+	Port     string `envconfig:"PORT" default:"8080"`
+	RootPath string `envconfig:"ROOT_PATH" default:"/static"`
 }
 
 func main() {
@@ -56,7 +56,6 @@ func main() {
 	// Wait for processing to complete properly
 	wg.Wait()
 }
-
 
 // GitCommit the git commit that was compiled. This will be filled in by the compiler.
 var GitCommit string
