@@ -2,20 +2,20 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"github.com/kelseyhightower/envconfig"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
-	"sync"
 	"syscall"
+	"time"
 )
 
 type envConfig struct {
-	Port     string `envconfig:"PORT" default:"8080"`
-	RootPath string `envconfig:"ROOT_PATH" default:"/static"`
+	Port     string
+	RootPath string
 }
 
 func main() {
@@ -26,42 +26,58 @@ func main() {
 	log.Printf("Build date : %s", BuildDate)
 	log.Printf("OSarch     : %s", OsArch)
 
-	// Define the environment configuration variables and process them from the environment or use defaults if not provided.
-	var env envConfig
-	if err := envconfig.Process("", &env); err != nil {
-		log.Printf("[ERROR] Failed to process env var: %s\n", err)
-		return
+	// Define the environment configuration variables and use defaults if not provided.
+	env := envConfig{
+		Port:     envOrDefault("PORT", "8080"),
+		RootPath: envOrDefault("ROOT_PATH", "/static"),
 	}
 
-	// Create a channel to listen for shutdown signals (e.g., SIGINT, SIGTERM).
-	signalChan := make(chan os.Signal, 1)
-	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
-	var wg sync.WaitGroup
+	// Create a context that is canceled by shutdown signals (e.g., SIGINT, SIGTERM).
+	shutdownSignal, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	// Set up the HTTP server to serve static files from the specified root path.
 	http.Handle("/", http.FileServer(http.Dir(env.RootPath)))
 
 	// Start the HTTP server on the configured port.
 	s := &http.Server{Addr: fmt.Sprint(":", env.Port)}
+	serverErr := make(chan error, 1)
 	go func() {
-		log.Fatal(s.ListenAndServe())
+		serverErr <- s.ListenAndServe()
 	}()
 
 	// Log the information about which directory is being served as static files.
 	log.Printf("Now serving static files in %s", env.RootPath)
 
-	// Block until a shutdown signal is received.
-	<-signalChan
-	log.Printf("Shutdown signal received, exiting...")
+	// Block until a shutdown signal is received or the server stops unexpectedly.
+	select {
+	case <-shutdownSignal.Done():
+		log.Printf("Shutdown signal received, exiting...")
+	case err := <-serverErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("HTTP server failed: %v", err)
+		}
+		return
+	}
 
-	// Gracefully shut down the HTTP server with a context background and log any errors during shutdown.
-	err := s.Shutdown(context.Background())
-	if err != nil {
+	// Give active requests a bounded window to finish before exiting.
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.Shutdown(shutdownContext); err != nil {
 		log.Fatalf("Got an error while shutting down: %v\n", err)
 	}
 
-	// Wait for all processing to complete properly before exiting the application.
-	wg.Wait()
+	if err := <-serverErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatalf("HTTP server failed while shutting down: %v", err)
+	}
+}
+
+func envOrDefault(key, defaultValue string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+
+	return defaultValue
 }
 
 // GitCommit the git commit that was compiled. This will be filled in by the compiler.
