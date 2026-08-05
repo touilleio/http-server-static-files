@@ -4,10 +4,16 @@ Http server serving static files
 This project aims at providing a basic http server in a docker container for serving static files.
 It is available for amd64, arm64 and arm/v7 platforms.
 
+The latest image is published to GitHub Container Registry on every push to `main`:
+
+```sh
+docker pull ghcr.io/touilleio/http-server-static-files:latest
+```
+
 # Usage
 
-```
-docker run -it -v ${PWD}/static:/static -p 8080:8080 touilleio/http-server-static-files:v1
+```sh
+docker run --rm -v "${PWD}/static:/static:ro" -p 8080:8080 ghcr.io/touilleio/http-server-static-files:latest
 ```
 
 ## Configuration
@@ -21,6 +27,6 @@ The configuration can be set via environment variables, defined in the table bel
 
 An example of changing the configuration via environment variable is provided below:
 
-```
-docker run -it -v ${PWD}/web:/web -e ROOT_PATH=/web -e PORT=8081 -p 8081:8081 touilleio/http-server-static-files:v1
+```sh
+docker run --rm -v "${PWD}/web:/web:ro" -e ROOT_PATH=/web -e PORT=8081 -p 8081:8081 ghcr.io/touilleio/http-server-static-files:latest
 ```
