@@ -27,5 +27,7 @@ FROM gcr.io/distroless/static-debian13:nonroot
 COPY --from=builder --chown=nonroot:nonroot /http-server-static-files /http-server-static-files
 COPY --chown=nonroot:nonroot static/index.html /static/index.html
 
+USER nonroot:nonroot
+
 ENTRYPOINT ["/http-server-static-files"]
 EXPOSE 8080
