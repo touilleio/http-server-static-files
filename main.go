@@ -9,13 +9,23 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 )
 
 type envConfig struct {
-	Port     string
-	RootPath string
+	Port                    string
+	RootPath                string
+	ReadHeaderTimeout       time.Duration
+	ReadTimeout             time.Duration
+	WriteTimeout            time.Duration
+	IdleTimeout             time.Duration
+	ContentSecurityPolicy   string
+	ReferrerPolicy          string
+	PermissionsPolicy       string
+	FrameOptions            string
+	StrictTransportSecurity string
 }
 
 func main() {
@@ -27,20 +37,37 @@ func main() {
 	log.Printf("OSarch     : %s", OsArch)
 
 	// Define the environment configuration variables and use defaults if not provided.
-	env := envConfig{
-		Port:     envOrDefault("PORT", "8080"),
-		RootPath: envOrDefault("ROOT_PATH", "/static"),
+	env, err := loadEnvConfig()
+	if err != nil {
+		log.Fatalf("Invalid configuration: %v", err)
 	}
+
+	root, err := os.OpenRoot(env.RootPath)
+	if err != nil {
+		log.Fatalf("Failed to open static file root %q: %v", env.RootPath, err)
+	}
+	defer func() {
+		if err := root.Close(); err != nil {
+			log.Printf("Failed to close static file root: %v", err)
+		}
+	}()
+
+	fileHandler := http.FileServerFS(root.FS())
+	handler := securityHeaders(env, allowedMethods(fileHandler))
 
 	// Create a context that is canceled by shutdown signals (e.g., SIGINT, SIGTERM).
 	shutdownSignal, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Set up the HTTP server to serve static files from the specified root path.
-	http.Handle("/", http.FileServer(http.Dir(env.RootPath)))
-
-	// Start the HTTP server on the configured port.
-	s := &http.Server{Addr: fmt.Sprint(":", env.Port)}
+	// Start the HTTP server with bounded request and connection lifetimes.
+	s := &http.Server{
+		Addr:              fmt.Sprint(":", env.Port),
+		Handler:           handler,
+		ReadHeaderTimeout: env.ReadHeaderTimeout,
+		ReadTimeout:       env.ReadTimeout,
+		WriteTimeout:      env.WriteTimeout,
+		IdleTimeout:       env.IdleTimeout,
+	}
 	serverErr := make(chan error, 1)
 	go func() {
 		serverErr <- s.ListenAndServe()
@@ -69,6 +96,96 @@ func main() {
 
 	if err := <-serverErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("HTTP server failed while shutting down: %v", err)
+	}
+}
+
+func loadEnvConfig() (envConfig, error) {
+	readHeaderTimeout, err := durationFromEnv("READ_HEADER_TIMEOUT", "1s")
+	if err != nil {
+		return envConfig{}, err
+	}
+	readTimeout, err := durationFromEnv("READ_TIMEOUT", "1s")
+	if err != nil {
+		return envConfig{}, err
+	}
+	writeTimeout, err := durationFromEnv("WRITE_TIMEOUT", "1s")
+	if err != nil {
+		return envConfig{}, err
+	}
+	idleTimeout, err := durationFromEnv("IDLE_TIMEOUT", "1s")
+	if err != nil {
+		return envConfig{}, err
+	}
+
+	config := envConfig{
+		Port:                    envOrDefault("PORT", "8080"),
+		RootPath:                envOrDefault("ROOT_PATH", "/static"),
+		ReadHeaderTimeout:       readHeaderTimeout,
+		ReadTimeout:             readTimeout,
+		WriteTimeout:            writeTimeout,
+		IdleTimeout:             idleTimeout,
+		ContentSecurityPolicy:   envOrDefault("CONTENT_SECURITY_POLICY", "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"),
+		ReferrerPolicy:          envOrDefault("REFERRER_POLICY", "strict-origin-when-cross-origin"),
+		PermissionsPolicy:       envOrDefault("PERMISSIONS_POLICY", "accelerometer=(), camera=(), geolocation=(), gyroscope=(), microphone=(), payment=(), usb=()"),
+		FrameOptions:            envOrDefault("FRAME_OPTIONS", "DENY"),
+		StrictTransportSecurity: os.Getenv("STRICT_TRANSPORT_SECURITY"),
+	}
+
+	for name, value := range map[string]string{
+		"CONTENT_SECURITY_POLICY":   config.ContentSecurityPolicy,
+		"REFERRER_POLICY":           config.ReferrerPolicy,
+		"PERMISSIONS_POLICY":        config.PermissionsPolicy,
+		"FRAME_OPTIONS":             config.FrameOptions,
+		"STRICT_TRANSPORT_SECURITY": config.StrictTransportSecurity,
+	} {
+		if strings.ContainsAny(value, "\r\n") {
+			return envConfig{}, fmt.Errorf("%s must not contain line breaks", name)
+		}
+	}
+
+	return config, nil
+}
+
+func durationFromEnv(key, defaultValue string) (time.Duration, error) {
+	value := envOrDefault(key, defaultValue)
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a valid duration: %w", key, err)
+	}
+	if duration <= 0 {
+		return 0, fmt.Errorf("%s must be greater than zero", key)
+	}
+
+	return duration, nil
+}
+
+func allowedMethods(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func securityHeaders(config envConfig, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		setHeaderIfConfigured(w, "Content-Security-Policy", config.ContentSecurityPolicy)
+		setHeaderIfConfigured(w, "Referrer-Policy", config.ReferrerPolicy)
+		setHeaderIfConfigured(w, "Permissions-Policy", config.PermissionsPolicy)
+		setHeaderIfConfigured(w, "X-Frame-Options", config.FrameOptions)
+		setHeaderIfConfigured(w, "Strict-Transport-Security", config.StrictTransportSecurity)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func setHeaderIfConfigured(w http.ResponseWriter, name, value string) {
+	if value != "" {
+		w.Header().Set(name, value)
 	}
 }
 
