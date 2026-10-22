@@ -29,6 +29,7 @@ The configuration can be set via environment variables, defined in the table bel
 |---------------|---------------|---------|
 | `PORT` | `8080` | Port the HTTP server listens on. |
 | `ROOT_PATH` | `/static` | Directory to publish. Files must be readable by the non-root user with UID `65532`. |
+| `FALLBACK_REDIRECT_URL` | empty | Optional absolute HTTP(S) base URL. Serve regular files locally and redirect all other paths with `301`, preserving the escaped path and query string. No credentials, query, or fragment allowed in this setting. |
 | `READ_HEADER_TIMEOUT` | `1s` | Maximum time to read request headers. |
 | `READ_TIMEOUT` | `1s` | Maximum time to read an entire request. |
 | `WRITE_TIMEOUT` | `1s` | Maximum response write duration. Increase this for large files or slow clients. |
@@ -46,3 +47,19 @@ An example of changing the configuration via environment variable is provided be
 ```sh
 docker run --rm -v "${PWD}/web:/web:ro" -e ROOT_PATH=/web -e PORT=8081 -p 8081:8081 ghcr.io/touilleio/http-server-static-files:latest
 ```
+
+## Redirect paths that are not files
+
+To serve existing files locally and redirect everything else to `http://www.website2.com/`, set:
+
+```sh
+docker run --rm -v "${PWD}/static:/static:ro" \
+  -e FALLBACK_REDIRECT_URL=http://www.website2.com/ \
+  -p 8080:8080 ghcr.io/touilleio/http-server-static-files:latest
+```
+
+For example, an existing `/photo.jpg` is served locally, while a missing `/old/page?lang=fr` returns `301 Location: http://www.website2.com/old/page?lang=fr`.
+
+Directories (including `/`) redirect even if they contain `index.html`, matching the `RewriteCond %{REQUEST_FILENAME} !-f` condition. An explicit request for an existing `/index.html` serves that file. `GET` and `HEAD` use the same redirect behavior; other methods still return `405`.
+
+Leave the setting empty to keep normal static serving, directory indexes, and `404` responses. This feature is configured through the environment; `.htaccess` files are not interpreted.

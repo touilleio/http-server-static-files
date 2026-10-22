@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"runtime"
@@ -17,6 +18,7 @@ import (
 type envConfig struct {
 	Port                    string
 	RootPath                string
+	FallbackRedirectURL     string
 	ReadHeaderTimeout       time.Duration
 	ReadTimeout             time.Duration
 	WriteTimeout            time.Duration
@@ -52,7 +54,7 @@ func main() {
 		}
 	}()
 
-	fileHandler := http.FileServerFS(root.FS())
+	fileHandler := staticFileHandler(root, env.FallbackRedirectURL)
 	handler := securityHeaders(env, allowedMethods(fileHandler))
 
 	// Create a context that is canceled by shutdown signals (e.g., SIGINT, SIGTERM).
@@ -120,6 +122,7 @@ func loadEnvConfig() (envConfig, error) {
 	config := envConfig{
 		Port:                    envOrDefault("PORT", "8080"),
 		RootPath:                envOrDefault("ROOT_PATH", "/static"),
+		FallbackRedirectURL:     os.Getenv("FALLBACK_REDIRECT_URL"),
 		ReadHeaderTimeout:       readHeaderTimeout,
 		ReadTimeout:             readTimeout,
 		WriteTimeout:            writeTimeout,
@@ -129,6 +132,16 @@ func loadEnvConfig() (envConfig, error) {
 		PermissionsPolicy:       envOrDefault("PERMISSIONS_POLICY", "accelerometer=(), camera=(), geolocation=(), gyroscope=(), microphone=(), payment=(), usb=()"),
 		FrameOptions:            envOrDefault("FRAME_OPTIONS", "DENY"),
 		StrictTransportSecurity: os.Getenv("STRICT_TRANSPORT_SECURITY"),
+	}
+
+	if config.FallbackRedirectURL != "" {
+		target, err := url.Parse(config.FallbackRedirectURL)
+		if err != nil || (target.Scheme != "http" && target.Scheme != "https") ||
+			target.Hostname() == "" || target.User != nil || target.RawQuery != "" ||
+			target.ForceQuery || strings.Contains(config.FallbackRedirectURL, "#") {
+			return envConfig{}, fmt.Errorf("FALLBACK_REDIRECT_URL must be an absolute HTTP(S) URL without credentials, query, or fragment")
+		}
+		config.FallbackRedirectURL = strings.TrimRight(target.String(), "/")
 	}
 
 	for name, value := range map[string]string{
@@ -168,6 +181,42 @@ func allowedMethods(next http.Handler) http.Handler {
 		}
 
 		next.ServeHTTP(w, r)
+	})
+}
+
+func staticFileHandler(root *os.Root, redirectURL string) http.Handler {
+	if redirectURL == "" {
+		return http.FileServerFS(root.FS())
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimLeft(r.URL.Path, "/")
+		if name == "" {
+			name = "."
+		}
+		info, err := root.Stat(name)
+		if err != nil || !info.Mode().IsRegular() {
+			target := redirectURL + "/" + strings.TrimPrefix(r.URL.EscapedPath(), "/")
+			if r.URL.RawQuery != "" || r.URL.ForceQuery {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+			return
+		}
+
+		file, err := root.Open(name)
+		if err != nil {
+			if errors.Is(err, os.ErrPermission) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+			} else {
+				http.Error(w, "failed to open file", http.StatusInternalServerError)
+			}
+			return
+		}
+		defer file.Close()
+
+		// ServeContent serves index.html directly, avoiding FileServer's redirect to its directory.
+		http.ServeContent(w, r, info.Name(), info.ModTime(), file)
 	})
 }
 
